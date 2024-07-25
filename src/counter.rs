@@ -58,28 +58,21 @@ impl<P: Atomic> GenericCounter<P> {
     ///
     /// Panics in debug build if the value is < 0.
     #[inline]
-    pub fn inc_by(&self, v: P::T) {
-        debug_assert!(v >= P::T::from_i64(0));
-        self.v.inc_by(v);
-    }
+    pub fn inc_by(&self, _v: P::T) {}
 
     /// Increase the counter by 1.
     #[inline]
-    pub fn inc(&self) {
-        self.v.inc();
-    }
+    pub fn inc(&self) {}
 
     /// Return the counter value.
     #[inline]
     pub fn get(&self) -> P::T {
-        self.v.get()
+        P::T::from_i64(0)
     }
 
     /// Restart the counter, resetting its value back to 0.
     #[inline]
-    pub fn reset(&self) {
-        self.v.set(P::T::from_i64(0))
-    }
+    pub fn reset(&self) {}
 
     /// Return a [`GenericLocalCounter`] for single thread usage.
     pub fn local(&self) -> GenericLocalCounter<P> {
@@ -89,11 +82,11 @@ impl<P: Atomic> GenericCounter<P> {
 
 impl<P: Atomic> Collector for GenericCounter<P> {
     fn desc(&self) -> Vec<&Desc> {
-        vec![&self.v.desc]
+        vec![]
     }
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
-        vec![self.v.collect()]
+        vec![]
     }
 }
 
@@ -202,38 +195,25 @@ impl<P: Atomic> GenericLocalCounter<P> {
     ///
     /// Panics in debug build if the value is < 0.
     #[inline]
-    pub fn inc_by(&self, v: P::T) {
-        debug_assert!(v >= P::T::from_i64(0));
-        *self.val.borrow_mut() += v;
-    }
+    pub fn inc_by(&self, _v: P::T) {}
 
     /// Increase the local counter by 1.
     #[inline]
-    pub fn inc(&self) {
-        *self.val.borrow_mut() += P::T::from_i64(1);
-    }
+    pub fn inc(&self) {}
 
     /// Return the local counter value.
     #[inline]
     pub fn get(&self) -> P::T {
-        *self.val.borrow()
+        P::T::from_i64(0)
     }
 
     /// Restart the counter, resetting its value back to 0.
     #[inline]
-    pub fn reset(&self) {
-        *self.val.borrow_mut() = P::T::from_i64(0);
-    }
+    pub fn reset(&self) {}
 
     /// Flush the local metrics to the [`Counter`].
     #[inline]
-    pub fn flush(&self) {
-        if *self.val.borrow() == P::T::from_i64(0) {
-            return;
-        }
-        self.counter.inc_by(*self.val.borrow());
-        *self.val.borrow_mut() = P::T::from_i64(0);
-    }
+    pub fn flush(&self) {}
 }
 
 impl<P: Atomic> LocalMetric for GenericLocalCounter<P> {

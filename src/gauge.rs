@@ -53,50 +53,40 @@ impl<P: Atomic> GenericGauge<P> {
 
     /// Set the gauge to an arbitrary value.
     #[inline]
-    pub fn set(&self, v: P::T) {
-        self.v.set(v);
-    }
+    pub fn set(&self, _v: P::T) {}
 
     /// Increase the gauge by 1.
     #[inline]
-    pub fn inc(&self) {
-        self.v.inc();
-    }
+    pub fn inc(&self) {}
 
     /// Decrease the gauge by 1.
     #[inline]
-    pub fn dec(&self) {
-        self.v.dec();
-    }
+    pub fn dec(&self) {}
 
     /// Add the given value to the gauge. (The value can be
     /// negative, resulting in a decrement of the gauge.)
     #[inline]
-    pub fn add(&self, v: P::T) {
-        self.v.inc_by(v);
-    }
+    pub fn add(&self, _v: P::T) {}
 
     /// Subtract the given value from the gauge. (The value can be
     /// negative, resulting in an increment of the gauge.)
     #[inline]
-    pub fn sub(&self, v: P::T) {
-        self.v.dec_by(v);
-    }
+    pub fn sub(&self, _v: P::T) {}
 
     /// Return the gauge value.
     #[inline]
     pub fn get(&self) -> P::T {
-        self.v.get()
+        P::T::from_i64(0)
     }
 }
 
 impl<P: Atomic> Collector for GenericGauge<P> {
     fn desc(&self) -> Vec<&Desc> {
-        vec![&self.v.desc]
+        vec![]
     }
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
-        vec![self.v.collect()]
+        vec![]
     }
 }
 

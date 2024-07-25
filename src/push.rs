@@ -78,99 +78,14 @@ pub fn push_add_metrics<S: BuildHasher>(
 const LABEL_NAME_JOB: &str = "job";
 
 fn push<S: BuildHasher>(
-    job: &str,
-    grouping: HashMap<String, String, S>,
-    url: &str,
-    mfs: Vec<proto::MetricFamily>,
-    method: &str,
-    basic_auth: Option<BasicAuthentication>,
+    _job: &str,
+    _grouping: HashMap<String, String, S>,
+    _url: &str,
+    _mfs: Vec<proto::MetricFamily>,
+    _method: &str,
+    _basic_auth: Option<BasicAuthentication>,
 ) -> Result<()> {
-    // Suppress clippy warning needless_pass_by_value.
-    let grouping = grouping;
-
-    let mut push_url = if url.contains("://") {
-        url.to_owned()
-    } else {
-        format!("http://{}", url)
-    };
-
-    if push_url.ends_with('/') {
-        push_url.pop();
-    }
-
-    let mut url_components = Vec::new();
-    if job.contains('/') {
-        return Err(Error::Msg(format!("job contains '/': {}", job)));
-    }
-
-    // TODO: escape job
-    url_components.push(job.to_owned());
-
-    for (ln, lv) in &grouping {
-        // TODO: check label name
-        if lv.contains('/') {
-            return Err(Error::Msg(format!(
-                "value of grouping label {} contains '/': {}",
-                ln, lv
-            )));
-        }
-        url_components.push(ln.to_owned());
-        url_components.push(lv.to_owned());
-    }
-
-    push_url = format!("{}/metrics/job/{}", push_url, url_components.join("/"));
-
-    let encoder = ProtobufEncoder::new();
-    let mut buf = Vec::new();
-
-    for mf in mfs {
-        // Check for pre-existing grouping labels:
-        for m in mf.get_metric() {
-            for lp in m.get_label() {
-                if lp.get_name() == LABEL_NAME_JOB {
-                    return Err(Error::Msg(format!(
-                        "pushed metric {} already contains a \
-                         job label",
-                        mf.get_name()
-                    )));
-                }
-                if grouping.contains_key(lp.get_name()) {
-                    return Err(Error::Msg(format!(
-                        "pushed metric {} already contains \
-                         grouping label {}",
-                        mf.get_name(),
-                        lp.get_name()
-                    )));
-                }
-            }
-        }
-        // Ignore error, `no metrics` and `no name`.
-        let _ = encoder.encode(&[mf], &mut buf);
-    }
-
-    let mut builder = HTTP_CLIENT
-        .request(
-            Method::from_str(method).unwrap(),
-            Url::from_str(&push_url).unwrap(),
-        )
-        .header(CONTENT_TYPE, encoder.format_type())
-        .body(buf);
-
-    if let Some(BasicAuthentication { username, password }) = basic_auth {
-        builder = builder.basic_auth(username, Some(password));
-    }
-
-    let response = builder.send().map_err(|e| Error::Msg(format!("{}", e)))?;
-
-    match response.status() {
-        StatusCode::ACCEPTED => Ok(()),
-        StatusCode::OK => Ok(()),
-        _ => Err(Error::Msg(format!(
-            "unexpected status code {} while pushing to {}",
-            response.status(),
-            push_url
-        ))),
-    }
+    Ok(())
 }
 
 fn push_from_collector<S: BuildHasher>(
