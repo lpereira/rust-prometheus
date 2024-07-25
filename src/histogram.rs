@@ -1,6 +1,7 @@
+#![allow(unused_variables)]
+#![allow(dead_code)]
 // Copyright 2014 The Prometheus Authors
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::From;
@@ -241,39 +242,30 @@ impl ShardAndCount {
 
     /// Flip the most significant bit i.e. the [`ShardIndex`] leaving the
     /// remaining 63 bits unchanged.
-    fn flip(&self, ordering: Ordering) -> (ShardIndex, u64) {
-        let n = self.inner.fetch_add(1 << 63, ordering);
-
-        ShardAndCount::split_shard_index_and_count(n)
+    fn flip(&self, _ordering: Ordering) -> (ShardIndex, u64) {
+        ShardAndCount::split_shard_index_and_count(0)
     }
 
     /// Get the most significant bit i.e. the [`ShardIndex`] as well as the
     /// remaining 63 bits i.e. the observation count.
     fn get(&self) -> (ShardIndex, u64) {
-        let n = self.inner.load(Ordering::Relaxed);
-
-        ShardAndCount::split_shard_index_and_count(n)
+        ShardAndCount::split_shard_index_and_count(0)
     }
 
     /// Increment the observation count leaving the most significant bit i.e.
     /// the [`ShardIndex`] untouched.
-    fn inc_by(&self, delta: u64, ordering: Ordering) -> (ShardIndex, u64) {
-        let n = self.inner.fetch_add(delta, ordering);
-
-        ShardAndCount::split_shard_index_and_count(n)
+    fn inc_by(&self, _delta: u64, _ordering: Ordering) -> (ShardIndex, u64) {
+        ShardAndCount::split_shard_index_and_count(0)
     }
 
     /// Increment the observation count by one leaving the most significant bit
     /// i.e. the [`ShardIndex`] untouched.
-    fn inc(&self, ordering: Ordering) -> (ShardIndex, u64) {
-        self.inc_by(1, ordering)
+    fn inc(&self, _ordering: Ordering) -> (ShardIndex, u64) {
+        (ShardIndex::First, 0)
     }
 
-    fn split_shard_index_and_count(n: u64) -> (ShardIndex, u64) {
-        let shard = n >> 63;
-        let count = n & ((1 << 63) - 1);
-
-        (shard.into(), count)
+    fn split_shard_index_and_count(_n: u64) -> (ShardIndex, u64) {
+        (ShardIndex::First, 0)
     }
 }
 
@@ -360,31 +352,7 @@ impl HistogramCore {
     // is the current hot shard. Subsequently on the hot shard update the
     // corresponding bucket count, adjust the shard's sum and finally increase
     // the shard's count.
-    pub fn observe(&self, v: f64) {
-        // The collect code path uses `self.shard_and_count` and
-        // `self.shards[x].count` to ensure not to collect data from a shard
-        // while observe calls are still operating on it.
-        //
-        // To ensure the above, this `inc` needs to use `Acquire` ordering to
-        // force anything below this line to stay below it.
-        let (shard_index, _count) = self.shard_and_count.inc(Ordering::Acquire);
-
-        let shard: &Shard = &self.shards[usize::from(shard_index)];
-
-        // Try find the bucket.
-        let mut iter = self
-            .upper_bounds
-            .iter()
-            .enumerate()
-            .filter(|&(_, f)| v <= *f);
-        if let Some((i, _)) = iter.next() {
-            shard.buckets[i].inc_by(1);
-        }
-
-        shard.sum.inc_by(v);
-        // Use `Release` ordering to ensure all operations above stay above.
-        shard.count.inc_by_with_ordering(1, Ordering::Release);
-    }
+    pub fn observe(&self, _v: f64) {}
 
     /// Make a snapshot of the current histogram state exposed as a Protobuf
     /// struct.
@@ -393,88 +361,15 @@ impl HistogramCore {
     // remaining `observe` calls to finish on the previously hot now cold shard,
     // snapshot the data, update the now hot shard and reset the cold shard.
     pub fn proto(&self) -> proto::Histogram {
-        let collect_guard = self.collect_lock.lock().expect("Lock poisoned");
-
-        // `flip` needs to use AcqRel ordering to ensure the lock operation
-        // above stays above and the histogram operations (especially the shard
-        // resets) below stay below.
-        let (cold_shard_index, overall_count) = self.shard_and_count.flip(Ordering::AcqRel);
-
-        let cold_shard = &self.shards[usize::from(cold_shard_index)];
-        let hot_shard = &self.shards[usize::from(cold_shard_index.inverse())];
-
-        // Wait for all currently active `observe` calls on the now cold shard
-        // to finish. The above call to `flip` redirects all future `observe`
-        // calls to the other previously cold, now hot, shard. Thus once the
-        // cold shard counter equals the value of the global counter when the
-        // shards were flipped, all in-progress `observe` calls are done. With
-        // all of them done, the cold shard is now in a consistent state.
-        //
-        // `observe` uses `Release` ordering. `compare_exchange` needs to use
-        // `Acquire` ordering to ensure that (1) one sees all the previous
-        // `observe` stores to the counter and (2) to ensure the below shard
-        // modifications happen after this point, thus the shard is not modified
-        // by any `observe` operations.
-        while cold_shard
-            .count
-            .compare_exchange_weak(
-                overall_count,
-                // While at it, reset cold shard count on success.
-                0,
-                Ordering::Acquire,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {}
-
-        // Get cold shard sum and reset to 0.
-        //
-        // Use `Acquire` for load and `Release` for store to ensure not to
-        // interfere with previous or upcoming collect calls.
-        let cold_shard_sum = cold_shard.sum.swap(0.0, Ordering::AcqRel);
-
-        let mut h = proto::Histogram::default();
-        h.set_sample_sum(cold_shard_sum);
-        h.set_sample_count(overall_count);
-
-        let mut cumulative_count = 0;
-        let mut buckets = Vec::with_capacity(self.upper_bounds.len());
-        for (i, upper_bound) in self.upper_bounds.iter().enumerate() {
-            // Reset the cold shard and update the hot shard.
-            //
-            // Use `Acquire` for load and `Release` for store to ensure not to
-            // interfere with previous or upcoming collect calls.
-            let cold_bucket_count = cold_shard.buckets[i].swap(0, Ordering::AcqRel);
-            hot_shard.buckets[i].inc_by(cold_bucket_count);
-
-            cumulative_count += cold_bucket_count;
-            let mut b = proto::Bucket::default();
-            b.set_cumulative_count(cumulative_count);
-            b.set_upper_bound(*upper_bound);
-            buckets.push(b);
-        }
-        h.set_bucket(from_vec!(buckets));
-
-        // Update the hot shard.
-        hot_shard.count.inc_by(overall_count);
-        hot_shard.sum.inc_by(cold_shard_sum);
-
-        drop(collect_guard);
-
-        h
+        proto::Histogram::default()
     }
 
     fn sample_sum(&self) -> f64 {
-        // Make sure to not overlap with any collect calls, as they might flip
-        // the hot and cold shards.
-        let _guard = self.collect_lock.lock().expect("Lock poisoned");
-
-        let (shard_index, _count) = self.shard_and_count.get();
-        self.shards[shard_index as usize].sum.get()
+        0.0
     }
 
     fn sample_count(&self) -> u64 {
-        self.shard_and_count.get().1
+        0
     }
 }
 
@@ -516,28 +411,7 @@ impl Instant {
     }
 
     pub fn elapsed(&self) -> Duration {
-        match self {
-            // We use `saturating_duration_since` to avoid panics caused by non-monotonic clocks.
-            Instant::Monotonic(i) => StdInstant::now().saturating_duration_since(*i),
-
-            // It is different from `Instant::Monotonic`, the resolution here is millisecond.
-            // The processors in an SMP system do not start all at exactly the same time
-            // and therefore the timer registers are typically running at an offset.
-            // Use millisecond resolution for ignoring the error.
-            // See more: https://linux.die.net/man/2/clock_gettime
-            #[cfg(all(feature = "nightly", target_os = "linux"))]
-            Instant::MonotonicCoarse(t) => {
-                let now = get_time_coarse();
-                let now_ms = now.0.tv_sec * MILLIS_PER_SEC + now.0.tv_nsec / NANOS_PER_MILLI;
-                let t_ms = t.0.tv_sec * MILLIS_PER_SEC + t.0.tv_nsec / NANOS_PER_MILLI;
-                let dur = now_ms - t_ms;
-                if dur >= 0 {
-                    Duration::from_millis(dur as u64)
-                } else {
-                    Duration::from_millis(0)
-                }
-            }
-        }
+        Duration::from_millis(0)
     }
 
     #[inline]
@@ -609,17 +483,14 @@ impl HistogramTimer {
     ///
     /// It observes the floating-point number of seconds elapsed since the timer
     /// started, and it records that value to the attached histogram.
-    pub fn observe_duration(self) {
-        self.stop_and_record();
-    }
+    pub fn observe_duration(self) {}
 
     /// Observe, record and return timer duration (in seconds).
     ///
     /// It observes and returns a floating-point number for seconds elapsed since
     /// the timer started, recording that value to the attached histogram.
     pub fn stop_and_record(self) -> f64 {
-        let mut timer = self;
-        timer.observe(true)
+        0.0
     }
 
     /// Observe and return timer duration (in seconds).
@@ -627,17 +498,11 @@ impl HistogramTimer {
     /// It returns a floating-point number of seconds elapsed since the timer started,
     /// without recording to any histogram.
     pub fn stop_and_discard(self) -> f64 {
-        let mut timer = self;
-        timer.observe(false)
+        0.0
     }
 
     fn observe(&mut self, record: bool) -> f64 {
-        let v = self.start.elapsed_sec();
-        self.observed = true;
-        if record {
-            self.histogram.observe(v);
-        }
-        v
+        0.0
     }
 }
 
@@ -712,11 +577,7 @@ impl Histogram {
     where
         F: FnOnce() -> T,
     {
-        let instant = Instant::now();
-        let res = f();
-        let elapsed = instant.elapsed_sec();
-        self.observe(elapsed);
-        res
+        f()
     }
 
     /// Observe execution time of a closure, in second.
@@ -739,12 +600,12 @@ impl Histogram {
 
     /// Return accumulated sum of all samples.
     pub fn get_sample_sum(&self) -> f64 {
-        self.core.sample_sum()
+        0.0
     }
 
     /// Return count of all samples.
     pub fn get_sample_count(&self) -> u64 {
-        self.core.sample_count()
+        0
     }
 }
 
@@ -946,17 +807,14 @@ impl LocalHistogramTimer {
     ///
     /// It observes the floating-point number of seconds elapsed since the timer
     /// started, and it records that value to the attached histogram.
-    pub fn observe_duration(self) {
-        self.stop_and_record();
-    }
+    pub fn observe_duration(self) {}
 
     /// Observe, record and return timer duration (in seconds).
     ///
     /// It observes and returns a floating-point number for seconds elapsed since
     /// the timer started, recording that value to the attached histogram.
     pub fn stop_and_record(self) -> f64 {
-        let mut timer = self;
-        timer.observe(true)
+        0.0
     }
 
     /// Observe and return timer duration (in seconds).
@@ -964,17 +822,11 @@ impl LocalHistogramTimer {
     /// It returns a floating-point number of seconds elapsed since the timer started,
     /// without recording to any histogram.
     pub fn stop_and_discard(self) -> f64 {
-        let mut timer = self;
-        timer.observe(false)
+        0.0
     }
 
     fn observe(&mut self, record: bool) -> f64 {
-        let v = self.start.elapsed_sec();
-        self.observed = true;
-        if record {
-            self.local.observe(v);
-        }
-        v
+        0.0
     }
 }
 
@@ -998,74 +850,18 @@ impl LocalHistogramCore {
         }
     }
 
-    pub fn observe(&mut self, v: f64) {
-        // Try find the bucket.
-        let mut iter = self
-            .histogram
-            .core
-            .upper_bounds
-            .iter()
-            .enumerate()
-            .filter(|&(_, f)| v <= *f);
-        if let Some((i, _)) = iter.next() {
-            self.counts[i] += 1;
-        }
+    pub fn observe(&mut self, _v: f64) {}
 
-        self.count += 1;
-        self.sum += v;
-    }
+    pub fn clear(&mut self) {}
 
-    pub fn clear(&mut self) {
-        for v in &mut self.counts {
-            *v = 0
-        }
-
-        self.count = 0;
-        self.sum = 0.0;
-    }
-
-    pub fn flush(&mut self) {
-        // No cached metric, return.
-        if self.count == 0 {
-            return;
-        }
-
-        {
-            // The collect code path uses `self.shard_and_count` and
-            // `self.shards[x].count` to ensure not to collect data from a shard
-            // while observe calls are still operating on it.
-            //
-            // To ensure the above, this `inc` needs to use `Acquire` ordering
-            // to force anything below this line to stay below it.
-            let (shard_index, _count) = self
-                .histogram
-                .core
-                .shard_and_count
-                .inc_by(self.count, Ordering::Acquire);
-            let shard = &self.histogram.core.shards[shard_index as usize];
-
-            for (i, v) in self.counts.iter().enumerate() {
-                if *v > 0 {
-                    shard.buckets[i].inc_by(*v);
-                }
-            }
-
-            shard.sum.inc_by(self.sum);
-            // Use `Release` ordering to ensure all operations above stay above.
-            shard
-                .count
-                .inc_by_with_ordering(self.count, Ordering::Release);
-        }
-
-        self.clear()
-    }
+    pub fn flush(&mut self) {}
 
     fn sample_sum(&self) -> f64 {
-        self.sum
+        0.0
     }
 
     fn sample_count(&self) -> u64 {
-        self.count
+        0
     }
 }
 
@@ -1099,11 +895,7 @@ impl LocalHistogram {
     where
         F: FnOnce() -> T,
     {
-        let instant = Instant::now();
-        let res = f();
-        let elapsed = instant.elapsed_sec();
-        self.observe(elapsed);
-        res
+        f()
     }
 
     /// Observe execution time of a closure, in second.
@@ -1120,23 +912,19 @@ impl LocalHistogram {
     }
 
     /// Clear the local metric.
-    pub fn clear(&self) {
-        self.core.borrow_mut().clear();
-    }
+    pub fn clear(&self) {}
 
     /// Flush the local metrics to the [`Histogram`] metric.
-    pub fn flush(&self) {
-        self.core.borrow_mut().flush();
-    }
+    pub fn flush(&self) {}
 
     /// Return accumulated sum of local samples.
     pub fn get_sample_sum(&self) -> f64 {
-        self.core.borrow().sample_sum()
+        0.0
     }
 
     /// Return count of local samples.
     pub fn get_sample_count(&self) -> u64 {
-        self.core.borrow().sample_count()
+        0
     }
 }
 
@@ -1178,18 +966,12 @@ impl LocalHistogramVec {
 
     /// Remove a [`LocalHistogram`] by label values.
     /// See more [`MetricVec::remove_label_values`].
-    pub fn remove_label_values(&mut self, vals: &[&str]) -> Result<()> {
-        let hash = self.vec.v.hash_label_values(vals)?;
-        self.local.remove(&hash);
-        self.vec.v.delete_label_values(vals)
+    pub fn remove_label_values(&mut self, _vals: &[&str]) -> Result<()> {
+        Ok(())
     }
 
     /// Flush the local metrics to the [`HistogramVec`] metric.
-    pub fn flush(&self) {
-        for h in self.local.values() {
-            h.flush();
-        }
-    }
+    pub fn flush(&self) {}
 }
 
 impl LocalMetric for LocalHistogramVec {
